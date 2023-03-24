@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import {computed, ref, watch} from 'vue';
 import {createFFmpeg, fetchFile} from '@ffmpeg/ffmpeg';
-import sourceVideo from '@/assets/video.webm';
+import sourceVideo from '@/assets/gate.mp4';
 import {useInterval} from '@vueuse/shared';
 
 const canvas = ref<HTMLCanvasElement>();
@@ -51,15 +51,15 @@ const extractFrames = async() => {
         video,
     );
 
-    await ffmpeg.run('-i', 'sourceVideo.webm', '%d.webp');
+    await ffmpeg.run('-i', 'sourceVideo.webm', '-q:v', '2', '%d.jpg');
 
     const framePaths = ffmpeg.FS('readdir', '/')
-        .filter(f => f.endsWith('.webp'));
+        .filter(f => f.endsWith('.jpg'));
 
     frames.value = framePaths.map((p) => {
         const data = ffmpeg.FS('readFile', p);
 
-        const blob = new Blob([data.buffer], {type: 'image/webp'});
+        const blob = new Blob([data.buffer], {type: 'image/jpg'});
 
         const img = new Image;
 
@@ -73,8 +73,8 @@ const extractFrames = async() => {
 <template>
     <canvas
         ref="canvas"
-        height="500"
-        width="500"
+        height="1080"
+        width="1920"
     />
 
     <div>
