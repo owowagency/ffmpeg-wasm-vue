@@ -40,33 +40,136 @@ const ffmpeg = createFFmpeg();
 
 ffmpeg.setLogger(({message}) => log.value += `${message}\n`);
 
-const extractFrames = async() => {
-    await ffmpeg.load();
+const createHash = async(data: Uint8Array): Promise<string> => {
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer)); // convert buffer to byte array
+    return hashArray
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('');
+};
 
-    const video = await fetchFile(sourceVideo);
-
-    await ffmpeg.FS(
-        'writeFile',
-        'sourceVideo.webm',
-        video,
-    );
-
-    await ffmpeg.run('-i', 'sourceVideo.webm', '-q:v', '2', '%d.jpg');
-
-    const framePaths = ffmpeg.FS('readdir', '/')
-        .filter(f => f.endsWith('.jpg'));
-
-    frames.value = framePaths.map((p) => {
-        const data = ffmpeg.FS('readFile', p);
-
-        const blob = new Blob([data.buffer], {type: 'image/jpg'});
-
-        const img = new Image;
-
-        img.src = URL.createObjectURL(blob);
-
-        return img;
+const openIndexDB = async(name: string, version: number, onCreateObjects: (db: IDBDatabase) => void | Promise<void>): Promise<IDBDatabase> => {
+    return new Promise((resolve, reject) => {
+        const request = indexedDB.open(name, version);
+        request.onerror = function(this: IDBRequest<IDBDatabase>) {
+            reject(this.error);
+        };
+        request.onupgradeneeded = async function(this: IDBOpenDBRequest) {
+            try {
+                await onCreateObjects(this.result);
+            } catch (e) {
+                reject(e);
+            }
+        };
+        request.onsuccess = function(this: IDBRequest<IDBDatabase>) {
+            resolve(this.result);
+        };
     });
+};
+
+function awaitTransaction(request: IDBTransaction): Promise<void> {
+    return new Promise((resolve, reject) => {
+        request.oncomplete = function() {
+            resolve();
+        };
+        request.onerror = function(this: IDBTransaction) {
+            reject(this.error);
+        };
+    });
+}
+
+function awaitRequest<T>(request: IDBRequest<T>): Promise<T> {
+    return new Promise((resolve, reject) => {
+        request.onsuccess = function() {
+            resolve(request.result);
+        };
+        request.onerror = function() {
+            reject(request.error);
+        };
+    });
+}
+
+const createDatabase = async() => {
+    return await openIndexDB('ffmpeg-cache', 1, (db: IDBDatabase) => {
+        const store = db.createObjectStore('frames', {autoIncrement: true});
+        store.createIndex('hash', 'hash', {unique: false});
+    });
+};
+
+const saveFrames = async(hash: string, blobs: Blob[]) => {
+    const database = await createDatabase();
+    const transaction = database.transaction(['frames'], 'readwrite');
+    const store = transaction.objectStore('frames');
+    for (const blob of blobs) {
+        await awaitRequest(store.add({blob, hash}));
+    }
+    transaction.commit();
+    await awaitTransaction(transaction);
+};
+
+const getFrames = async(hash: string): Promise<Blob[]> => {
+    const database = await createDatabase();
+    const transaction = database.transaction(['frames'], 'readonly');
+    const request = transaction.objectStore('frames')
+        .index('hash')
+        .getAll(hash);
+    const result = await awaitRequest(request);
+    return result.map(item => item.blob);
+};
+
+const extractFrames = async() => {
+    try {
+        const video = await fetchFile(sourceVideo);
+        const hash = await createHash(video);
+        const cached = await getFrames(hash);
+
+        if (cached.length > 0) {
+            frames.value = cached.map(blob => {
+                const img = new Image;
+
+                img.src = URL.createObjectURL(blob);
+
+                return img;
+            });
+            return;
+        }
+
+        await ffmpeg.load();
+
+        const output = 'gate.mp4';
+
+        await ffmpeg.FS(
+            'writeFile',
+            output,
+            video,
+        );
+
+        await ffmpeg.run('-i', output, '-q:v', '2', '%d.jpg');
+
+        const framePaths = ffmpeg.FS('readdir', '/')
+            .filter(f => f.endsWith('.jpg'));
+
+        const blobs = framePaths
+            .map((p) => {
+                const data = ffmpeg.FS('readFile', p);
+
+                return new Blob([data.buffer], {type: 'image/jpg'});
+            });
+
+        await saveFrames(hash, blobs);
+
+        frames.value = blobs.map(blob => {
+            const img = new Image;
+
+            img.src = URL.createObjectURL(blob);
+
+            return img;
+        });
+    } catch (e) {
+        if (e instanceof Error) {
+            log.value += e.message;
+        }
+    }
 };
 </script>
 
